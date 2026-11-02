@@ -518,3 +518,152 @@ Berikut panduan langkah demi langkah yang dapat langsung dipraktikkan untuk meng
 ---
 
 Dengan mengikuti panduan di atas, Fitur 1 (Health Check) dan Fitur 2 (Hero) telah selesai dikerjakan, terverifikasi ke database cloud, dan siap didemonstrasikan dengan hasil pengujian 100% sesuai spesifikasi soal.
+
+---
+
+## 4. Fitur 3 (Skin), Fitur 4 (Player), & Fitur 5 (Top Up & Match)
+
+Bagian ini melanjutkan panduan di atas untuk Fitur 3 sampai 5. Semua endpoint memakai helper yang sama dengan Fitur 2 (`HttpError`, `parseId`, `sendSuccess`), jadi format response sukses dan gagal tetap seragam.
+
+### Konsep Tambahan
+
+1. **Filter dinamis + pagination:** Objek `where` dibangun sesuai query yang dikirim (`heroId`, `rarity`), lalu dipakai bersama oleh `findMany` dan `count`. Dengan begitu `totalItems` di `metadata` selalu ikut terfilter.
+2. **Validasi enum di pintu masuk:** Nilai `rarity` dicek terhadap enum `Rarity` dari Prisma. Nilai ngawur (misal `rarity=FOO`) dibalas **400** dengan daftar nilai yang valid, bukan error 500 dari database.
+3. **`increment` atomik:** Top up dan hadiah match memakai `{ increment: n }`. Penambahan dilakukan langsung oleh database, sehingga dua request bersamaan tidak saling menimpa (berbeda dengan pola baca → tambah → simpan).
+4. **Urutan pemeriksaan:** Setiap endpoint memeriksa satu per satu dan berhenti di kegagalan pertama, sesuai urutan di soal (400 → 404 → 409).
+
+---
+
+### Step 10: Fitur 3 (Skin)
+
+- **File:** `src/controllers/skinController.ts`, `src/routes/skin.routes.ts`
+- **`GET /api/skins`:**
+  - Query: `page` (default 1), `limit` (default 10), `heroId`, `rarity`.
+  - Memakai `include: { hero: { select: { name: true } } }` agar tiap skin membawa nama hero-nya.
+  - `heroId` bukan bilangan bulat positif → **400**. `rarity` bukan salah satu enum → **400**.
+- **`GET /api/skins/:skin_id`:**
+  - Menampilkan skin beserta data hero lengkap (`include: { hero: true }`).
+  - Skin tidak ada → **404** ("Skin tidak ditemukan").
+
+---
+
+### Step 11: Fitur 4 (Player)
+
+- **File:** `src/controllers/playerController.ts`, `src/routes/player.routes.ts`
+- **`POST /api/players`:** body `{ "nickname": "..." }`. Nickname kosong → **400**, sudah dipakai → **409**, berhasil → **201**. Saldo awal (10000 BP, 0 Diamond) terisi otomatis dari default schema.
+- **`GET /api/players/:player_id`:** menampilkan player beserta daftar hero miliknya. Tiap hero diringkas menjadi `{ heroId, name, currency, pricePaid }`. Tidak ada → **404**.
+- **`PATCH /api/players/:player_id`:** mengganti nickname. Urutan: player tidak ada → **404**, nickname kosong → **400**, dipakai player lain → **409**. Mengganti ke nickname milik sendiri tetap diizinkan.
+- **`DELETE /api/players/:player_id`:** menghapus player. `PlayerHero` milik player ikut terhapus lewat `onDelete: Cascade` di schema. Tidak ada → **404**.
+
+---
+
+### Step 12: Fitur 5 (Top Up & Match)
+
+- **`POST /api/players/:player_id/topup`:** body `{ "amount": 706 }`.
+  - `amount` bukan angka bulat lebih dari 0 (termasuk string `"50"`, desimal, atau negatif) → **400**.
+  - Player tidak ada → **404**.
+  - Berhasil → **200** berisi `playerId`, `amount`, dan `diamond` terbaru.
+- **`POST /api/players/:player_id/matches`:** body `{ "result": "WIN" }`.
+  - `result` selain `WIN` / `LOSE` → **400**. Player tidak ada → **404**.
+  - Berhasil → **200**. WIN menambah 300 BP, LOSE menambah 100 BP. Response berisi `playerId`, `result`, `bpEarned`, dan `bp` terbaru.
+
+---
+
+### Step 13: Perbaikan Seed (Sequence ID Player)
+
+- **Masalah:** `seed.ts` memasukkan player dengan `id` 1, 2, 3 secara manual. Saat id diisi manual, PostgreSQL **tidak** memajukan penghitung otomatis (sequence) `Player_id_seq`. Akibatnya `POST /api/players` mencoba memakai id 1 yang sudah terpakai dan gagal dengan error unique constraint (terbaca sebagai 409 "Data sudah ada").
+- **Solusi:** setelah memasukkan 3 player, seed menjalankan:
+  ```typescript
+  await prisma.$executeRaw`SELECT setval(pg_get_serial_sequence('"Player"', 'id'), (SELECT MAX(id) FROM "Player"))`;
+  ```
+  Penghitung dimajukan ke id terbesar, sehingga player baru mendapat id 4.
+- Data seed tetap sama persis seperti di soal.
+
+---
+
+## 5. Testcase Fitur 3, 4, & 5 di Postman
+
+Jalankan `npx tsx prisma/seed.ts` lebih dulu, lalu kirim request berurutan dari collection `testcase.json`.
+
+### Testcase 09: Daftar Skin Layla
+- **Request:** `GET http://localhost:3000/api/skins?heroId=18`
+- **Hasil yang harus muncul:** **`200 OK`**. Tiap skin memuat `"hero": { "name": "Layla" }`, dan `metadata.totalItems` adalah **11**:
+  ```json
+  "metadata": { "currentPage": 1, "limit": 10, "totalItems": 11, "totalPages": 2 }
+  ```
+
+### Testcase 10: Daftar Skin Rarity GRAND
+- **Request:** `GET http://localhost:3000/api/skins?rarity=GRAND`
+- **Hasil yang harus muncul:** **`200 OK`**, `metadata.totalItems` adalah **98**.
+
+### Testcase 11: Detail Skin Silverbolt Raiko
+- **Request:** `GET http://localhost:3000/api/skins/891`
+- **Hasil yang harus muncul:** **`200 OK`**, skin **Silverbolt Raiko** milik hero **Selena**:
+  ```json
+  { "status": true, "message": "Berhasil mengambil data skin",
+    "data": { "id": 891, "name": "Silverbolt Raiko", "rarity": "GRAND", "heroId": 63,
+              "hero": { "id": 63, "name": "Selena", "...": "..." } } }
+  ```
+
+### Testcase 12: Buat Player JunglerMalam
+- **Request:** `POST http://localhost:3000/api/players`, body JSON `{ "nickname": "JunglerMalam" }`
+- **Hasil yang harus muncul:** **`201 Created`**, `id` **4**, `bp` 10000, `diamond` 0:
+  ```json
+  { "status": true, "message": "Player berhasil dibuat",
+    "data": { "id": 4, "nickname": "JunglerMalam", "bp": 10000, "diamond": 0, "createdAt": "..." } }
+  ```
+
+### Testcase 13: Buat Player Nickname Dipakai
+- **Request:** `POST /api/players`, body `{ "nickname": "ArekITS" }`
+- **Hasil yang harus muncul:** **`409 Conflict`**, `{ "status": false, "message": "Nickname sudah dipakai" }`
+
+### Testcase 14: Top Up 706 Diamond
+- **Request:** `POST /api/players/3/topup`, body `{ "amount": 706 }`
+- **Hasil yang harus muncul:** **`200 OK`**. Player 3 mulai dari 0 Diamond, sehingga saldo menjadi 706:
+  ```json
+  { "status": true, "message": "Top up berhasil",
+    "data": { "playerId": 3, "amount": 706, "diamond": 706 } }
+  ```
+
+### Testcase 15: Top Up Amount Negatif
+- **Request:** `POST /api/players/3/topup`, body `{ "amount": -10 }`
+- **Hasil yang harus muncul:** **`400 Bad Request`**, `{ "status": false, "message": "amount harus bilangan bulat lebih dari 0" }`
+
+### Testcase 16: Match Menang (WIN)
+- **Request:** `POST /api/players/3/matches`, body `{ "result": "WIN" }`
+- **Hasil yang harus muncul:** **`200 OK`**. Player 3 mulai dari 10000 BP, sehingga menjadi 10300:
+  ```json
+  { "status": true, "message": "Match berhasil dicatat",
+    "data": { "playerId": 3, "result": "WIN", "bpEarned": 300, "bp": 10300 } }
+  ```
+
+### Testcase 22: Detail Player MageSurabaya
+- **Request:** `GET /api/players/3`
+- **Hasil yang harus muncul:** **`200 OK`**. Setelah Fitur 6 (Beli Hero) selesai, daftar `heroes` berisi Freya dan Layla:
+  ```json
+  "heroes": [
+    { "heroId": 22, "name": "Freya", "currency": "DIAMOND", "pricePaid": 599 },
+    { "heroId": 18, "name": "Layla", "currency": "BP", "pricePaid": 2000 }
+  ]
+  ```
+  Sebelum Fitur 6 ada, `heroes` berupa array kosong `[]`.
+
+### Testcase 23: Ganti Nickname Jadi MageITS
+- **Request:** `PATCH /api/players/3`, body `{ "nickname": "MageITS" }`
+- **Hasil yang harus muncul:** **`200 OK`**, `{ "status": true, "message": "Nickname berhasil diubah", "data": { "id": 3, "nickname": "MageITS", ... } }`
+
+### Testcase 24: Ganti Nickname Dipakai
+- **Request:** `PATCH /api/players/3`, body `{ "nickname": "ArekITS" }`
+- **Hasil yang harus muncul:** **`409 Conflict`**, `{ "status": false, "message": "Nickname sudah dipakai player lain" }`
+
+### Testcase 26: Hapus Player JunglerMalam
+- **Request:** `DELETE /api/players/4`
+- **Hasil yang harus muncul:** **`200 OK`**, `{ "status": true, "message": "Player berhasil dihapus" }`
+
+### Testcase 27: Detail Player Terhapus
+- **Request:** `GET /api/players/4`
+- **Hasil yang harus muncul:** **`404 Not Found`**, `{ "status": false, "message": "Player tidak ditemukan" }`
+
+### Testcase 28: Endpoint Tidak Ada
+- **Request:** `GET /api/ngawur`
+- **Hasil yang harus muncul:** **`404 Not Found`**, `{ "status": false, "message": "Endpoint GET /api/ngawur tidak ditemukan" }`
