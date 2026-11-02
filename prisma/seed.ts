@@ -36,6 +36,8 @@ async function main() {
       { id: 3, nickname: "MageSurabaya", bp: 10000, diamond: 0 },
     ],
   });
+  // id diisi manual, jadi sequence harus disusulkan agar player baru tidak bentrok
+  await prisma.$executeRaw`SELECT setval(pg_get_serial_sequence('"Player"', 'id'), (SELECT MAX(id) FROM "Player"))`;
   console.log("Seeded 3 players.");
 
   // 5. Masukkan data awal PlayerHero
