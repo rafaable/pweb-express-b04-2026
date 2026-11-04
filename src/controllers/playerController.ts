@@ -6,6 +6,13 @@ import { sendSuccess } from "../utils/response";
 
 const MATCH_REWARD = { WIN: 300, LOSE: 100 } as const;
 
+// Mata uang yang boleh dipakai untuk beli hero
+const CURRENCIES = ["BP", "DIAMOND"] as const;
+type CurrencyValue = (typeof CURRENCIES)[number];
+
+const isCurrency = (value: unknown): value is CurrencyValue =>
+  typeof value === "string" && (CURRENCIES as readonly string[]).includes(value);
+
 // Nickname harus string tidak kosong; selain itu 400.
 const parseNickname = (value: unknown): string => {
   const nickname = typeof value === "string" ? value.trim() : "";
@@ -142,4 +149,72 @@ export const playMatch = async (req: Request, res: Response) => {
   });
 
   sendSuccess(res, 200, "Match berhasil dicatat", { playerId, result, bpEarned, bp: updated.bp });
+};
+
+// POST /api/players/:player_id/heroes  (Fitur 6: Beli Hero)
+export const buyHero = async (req: Request, res: Response) => {
+  const playerId = parseId(req.params.player_id);
+  const { heroId, currency } = req.body ?? {};
+
+  // Cek 1: heroId kosong / currency bukan BP atau DIAMOND -> 400
+  if (typeof heroId !== "number" || !Number.isInteger(heroId) || heroId <= 0) {
+    throw new HttpError(400, "heroId wajib diisi dengan bilangan bulat positif");
+  }
+  if (!isCurrency(currency)) {
+    throw new HttpError(400, "currency harus BP atau DIAMOND");
+  }
+
+  // Cek 2: player tidak ditemukan -> 404
+  const player = await prisma.player.findUnique({ where: { id: playerId } });
+  if (!player) {
+    throw new HttpError(404, "Player tidak ditemukan");
+  }
+
+  // Cek 3: hero tidak ditemukan -> 404
+  const hero = await prisma.hero.findUnique({ where: { id: heroId } });
+  if (!hero) {
+    throw new HttpError(404, "Hero tidak ditemukan");
+  }
+
+  // Cek 4: harga hero untuk currency tersebut kosong (null) -> 400
+  const price = currency === "BP" ? hero.priceBP : hero.priceDiamond;
+  if (price === null) {
+    throw new HttpError(400, `Hero ${hero.name} tidak bisa dibeli dengan ${currency}`);
+  }
+
+  // Cek 5: player sudah memiliki hero tersebut -> 409
+  const owned = await prisma.playerHero.findUnique({
+    where: { playerId_heroId: { playerId, heroId } },
+  });
+  if (owned) {
+    throw new HttpError(409, `Player sudah memiliki hero ${hero.name}`);
+  }
+
+  // Cek 6: saldo player kurang dari harga hero -> 400
+  const balance = currency === "BP" ? player.bp : player.diamond;
+  if (balance < price) {
+    throw new HttpError(400, `Saldo ${currency} tidak cukup untuk membeli hero ${hero.name}`);
+  }
+
+  // Transaction: kurangi saldo + catat PlayerHero, keduanya berhasil bareng atau gagal bareng
+  const [updatedPlayer] = await prisma.$transaction([
+    prisma.player.update({
+      where: { id: playerId },
+      data:
+        currency === "BP"
+          ? { bp: { decrement: price } }
+          : { diamond: { decrement: price } },
+      select: { bp: true, diamond: true },
+    }),
+    prisma.playerHero.create({
+      data: { playerId, heroId, currency, pricePaid: price },
+    }),
+  ]);
+
+  sendSuccess(res, 201, "Hero berhasil dibeli", {
+    hero: { id: hero.id, name: hero.name },
+    currency,
+    pricePaid: price,
+    balance: { bp: updatedPlayer.bp, diamond: updatedPlayer.diamond },
+  });
 };
